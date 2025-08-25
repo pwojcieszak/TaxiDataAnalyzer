@@ -1,0 +1,31 @@
+---
+- name: Distribute SSH key to workers
+  hosts: ssh_clients
+  become: yes
+  tasks:
+    - name: Ensure .ssh directory exists for ansible_user on remote hosts
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Copy LOCAL private key to remote hosts
+      ansible.builtin.copy:
+        src: "/content/.ssh/id_ed25519"
+        dest: "/home/{{ ansible_user }}/.ssh/id_pdd"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Add IdentityFile entry to .ssh/config
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ansible_user }}/.ssh/config"
+        line: "IdentityFile /home/{{ ansible_user }}/.ssh/id_pdd"
+        insertafter: EOF
+        state: present
+        create: true
+        mode: '0600'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"

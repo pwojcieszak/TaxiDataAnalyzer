@@ -1,0 +1,6 @@
+---
+  java_version: "11"
+  scala_version: "2.13"
+  kafka_version: "3.9.0"
+  kafka_dir: "/home/pa_wojciesza/kafka"
+  kafka_tgz: "kafka_{{ scala_version }}-{{ kafka_version }}.tgz"

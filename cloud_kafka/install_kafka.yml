@@ -1,0 +1,101 @@
+---
+- name: Configure Kafka (Kraft Standalone)
+  hosts: kafka
+  become: yes
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        
+    - name: Install OpenJDK JRE Headless
+      ansible.builtin.apt:
+        name: "openjdk-{{ java_version }}-jre-headless"
+        state: present
+        update_cache: yes
+
+    - name: Install python3-pip
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Install Python packages via pip
+      pip:
+        name:
+          - pandas
+          - pyarrow
+          - kafka-python
+        executable: pip3
+    
+    - name: Set JAVA_HOME for Kafka
+      ansible.builtin.copy:
+        dest: /etc/profile.d/spark_hadoop.sh
+        content: "export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64"
+        mode: '0644'
+    
+    - name: Create Kafka installation directory
+      ansible.builtin.file:
+        path: "{{ kafka_dir }}"
+        state: directory
+
+    - name: Download and Extract Kafka
+      ansible.builtin.unarchive:
+        src: "https://dlcdn.apache.org/kafka/{{ kafka_version }}/{{ kafka_tgz }}"
+        dest: "{{ kafka_dir }}"
+        remote_src: true
+        extra_opts: [--strip-components=1]
+        creates: "{{ kafka_dir }}/bin"
+    
+    - name: Copy local producer.py to remote host
+      ansible.builtin.copy:
+        src: producer.py
+        dest: /home/{{ ansible_user }}/producer.py
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Clear Kafka logs
+      file:
+        path: "{{ kafka_dir }}/logs"
+        state: absent
+      ignore_errors: true
+
+    - name: Stop Kafka if running
+      shell: "{{ kafka_dir }}/bin/kafka-server-stop.sh"
+      ignore_errors: true
+
+    - name: Remove previous KRaft logs
+      file:
+        path: /tmp/kraft-combined-logs
+        state: absent
+    
+    - name: Generate Kafka cluster UUID
+      shell: "{{ kafka_dir }}/bin/kafka-storage.sh random-uuid"
+      register: kafka_cluster_id
+
+    - name: Format Kafka storage
+      shell: "{{ kafka_dir }}/bin/kafka-storage.sh format -t {{ kafka_cluster_id.stdout }} --standalone -c {{ kafka_dir }}/config/kraft/server.properties"
+    
+    - name: Configure advertised.listeners in server.properties
+      ansible.builtin.lineinfile:
+        path: "{{ kafka_dir }}/config/kraft/server.properties"
+        regexp: '^#advertised.listeners='
+        line: "advertised.listeners=PLAINTEXT://kafka:9092,CONTROLLER://kafka:9093"
+        insertafter: EOF
+      
+    - name: Ensure Kafka directory exists
+      file:
+        path: "{{ kafka_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Start Kafka in daemon mode
+      shell: "{{ kafka_dir }}/bin/kafka-server-start.sh -daemon kafka/config/kraft/server.properties"
+    
+    - name: Create Kafka topics
+      shell: |
+        {{ kafka_dir }}/bin/kafka-topics.sh --create --if-not-exists --topic start_topic --bootstrap-server kafka:9092
+        {{ kafka_dir }}/bin/kafka-topics.sh --create --if-not-exists --topic end_topic --bootstrap-server kafka:9092
+  

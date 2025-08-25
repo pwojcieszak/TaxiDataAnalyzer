@@ -1,0 +1,207 @@
+---
+- name: Configure Master, Workers, and Driver for Spark/Hadoop
+  hosts: spark_machines
+  become: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install common dependencies
+      ansible.builtin.apt:
+        pkg:
+          - default-jdk
+          - scala
+          - git
+          - wget
+        state: present
+
+    - name: Download and extract Spark
+      ansible.builtin.unarchive:
+        src: "https://dlcdn.apache.org/spark/spark-{{ spark_version }}/spark-{{ spark_version }}-bin-hadoop3.tgz"
+        dest: "/opt/"
+        remote_src: yes 
+        creates: "{{ spark_home }}"
+
+    - name: Rename Spark directory
+      ansible.builtin.command: "mv /opt/spark-{{ spark_version }}-bin-hadoop3 {{ spark_home }}"
+      args:
+        creates: "{{ spark_home }}"
+
+    - name: Download and extract Hadoop
+      ansible.builtin.unarchive:
+        src: "https://dlcdn.apache.org/hadoop/common/hadoop-{{ hadoop_version }}/hadoop-{{ hadoop_version }}.tar.gz"
+        dest: "/opt/"
+        remote_src: yes 
+        creates: "{{ hadoop_home }}"
+
+    - name: Rename Hadoop directory
+      ansible.builtin.command: "mv /opt/hadoop-{{ hadoop_version }} {{ hadoop_home }}"
+      args:
+        creates: "{{ hadoop_home }}" 
+
+    - name: Set ENVVARS for Spark and Hadoop
+      ansible.builtin.copy:
+        dest: /etc/profile.d/spark_hadoop.sh
+        content: |
+          export SPARK_HOME={{ spark_home }}
+          export HADOOP_HOME={{ hadoop_home }}
+          export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+          export PYSPARK_PYTHON=/usr/bin/python3
+          export SPARK_MASTER_HOST=master
+          export PATH=$PATH:/opt/spark/bin:/opt/spark/sbin:/opt/hadoop/bin:/opt/hadoop/sbin:$HOME/.local/bin
+        mode: '0644'
+
+    - name: Configure Hadoop environment variables
+      ansible.builtin.template:
+        src: templates/hadoop-env.sh.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/hadoop-env.sh"
+        mode: '0755'
+    
+    - name: Create core-site.xml directory (if not exists)
+      ansible.builtin.file:
+        path: "{{ hadoop_home }}/etc/hadoop/"
+        state: directory
+        mode: '0755'
+
+    - name: Configure core-site.xml (common for all nodes)
+      ansible.builtin.template:
+        src: templates/core-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/core-site.xml"
+        mode: '0644'
+    
+    - name: Ensure correct ownership for Spark installation
+      ansible.builtin.file:
+        path: "{{ spark_home }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: yes
+        state: directory
+
+    - name: Ensure correct ownership for Hadoop installation
+      ansible.builtin.file:
+        path: "{{ hadoop_home }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: yes
+        state: directory
+
+- name: Master specific configurations
+  hosts: master
+
+  tasks:
+    - name: Generate workers file for HDFS
+      ansible.builtin.template:
+        src: templates/workers.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/workers"
+        mode: '0644'
+
+    - name: Create namenode directory
+      ansible.builtin.file:
+        path: "{{ namenode_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Configure hdfs-site.xml for master
+      ansible.builtin.template:
+        src: templates/hdfs-site-master.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/hdfs-site.xml"
+        mode: '0644'
+
+    - name: Start Spark Master
+      ansible.builtin.shell: "{{ spark_home }}/sbin/start-master.sh"
+      args:
+        executable: /bin/bash
+
+- name: Worker specific configurations
+  hosts: workers
+
+  tasks:
+    - name: Create datanode directory
+      ansible.builtin.file:
+        path: "{{ datanode_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Configure hdfs-site.xml for workers
+      ansible.builtin.template:
+        src: templates/hdfs-site-worker.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/hdfs-site.xml"
+        mode: '0644'
+
+    - name: Start Spark Worker
+      ansible.builtin.shell: "{{ spark_home }}/sbin/start-worker.sh spark://{{ master_node }}:7077"
+      args:
+        executable: /bin/bash
+
+- name: Driver specific configurations
+  hosts: driver
+
+  tasks:
+    - name: Install additional driver dependencies
+      ansible.builtin.apt:
+        pkg:
+          - python3-pip
+          - python3-venv
+        state: present
+      become: true
+
+    - name: Create Python virtual environment
+      ansible.builtin.command: "python3 -m venv venv"
+      args:
+        chdir: "{{ ansible_env.HOME }}"
+        creates: "{{ ansible_env.HOME }}/venv"
+
+    - name: Install Python packages in venv
+      become: true
+      ansible.builtin.pip:
+        name:
+          - "pyspark=={{ spark_version }}"
+          - jupyter        
+        virtualenv: "{{ ansible_env.HOME }}/venv"
+        virtualenv_command: python3 -m venv
+      args:
+        chdir: "{{ ansible_env.HOME }}"
+
+    - name: Start Jupyter Notebook in background
+      become: false
+      ansible.builtin.shell: |
+        source ~/venv/bin/activate
+        nohup jupyter notebook --no-browser \
+          --port=8888 \
+          --NotebookApp.allow_origin='https://colab.research.google.com' \
+          --NotebookApp.port_retries=0 \
+          > ~/jupyter.log 2>&1 &
+      args:
+        executable: /bin/bash
+
+    - name: Wait for Jupyter to start
+      ansible.builtin.wait_for:
+        path: "{{ ansible_env.HOME }}/jupyter.log"
+        search_regex: "http://.*token="
+        timeout: 30
+
+    - name: Get Jupyter URL with token
+      ansible.builtin.shell: grep -o 'http://.*token=[a-z0-9]*' ~/jupyter.log | head -n 1
+      register: jupyter_url
+      args:
+        executable: /bin/bash
+
+    - name: Show Jupyter token URL
+      ansible.builtin.debug:
+        msg: "Jupyter URL: {{ jupyter_url.stdout }}"
+
+- name: Run Hadoop on Master
+  hosts: master
+  
+  tasks:
+    - name: Format HDFS namenode
+      ansible.builtin.shell: "yes Y | {{ hadoop_home }}/bin/hdfs namenode -format"
+      args:
+        creates: "{{ namenode_dir }}/current"
+  
+    - name: Start HDFS NameNode and Spark Master
+      ansible.builtin.shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
+      args:
+        executable: /bin/bash
